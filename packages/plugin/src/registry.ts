@@ -60,6 +60,10 @@ function parseSource(source: string): { type: SourceType; ref: string; installAr
     const ref = p.startsWith('/') || /^[A-Za-z]:/.test(p) ? p : `${globalThis.process?.cwd?.() ?? '.'}/${p}`;
     return { type: 'file', ref, installArg: ref };
   }
+  // Windows absolute path: C:\... or C:/...
+  if (/^[A-Za-z]:[/\\]/.test(source)) {
+    return { type: 'file', ref: source, installArg: source };
+  }
   if (source.startsWith('github:')) return { type: 'github', ref: source.slice(7), installArg: source };
   if (source.startsWith('git:')) return { type: 'git', ref: source.slice(4), installArg: source.slice(4) };
   if (source.startsWith('npm:')) return { type: 'npm', ref: source.slice(4), installArg: source.slice(4) };
@@ -67,27 +71,14 @@ function parseSource(source: string): { type: SourceType; ref: string; installAr
 }
 
 async function bunRun(args: string[], cwd: string, label: string, logger: PluginLogger): Promise<void> {
-  const { spawn, execFileSync } = await import('node:child_process');
-  let bunExe = 'bun';
-  try {
-    const which = process.platform === 'win32' ? 'where' : 'which';
-    bunExe = execFileSync(which, ['bun'], { encoding: 'utf-8' }).trim().split('\n')[0].trim();
-  } catch { /* bun not found via which/where, fall back to PATH */ }
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn(bunExe, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', (err) => reject(new Error(`Plugin install failed for "${label}": ${err.message}`)));
-    proc.on('close', (code) => {
-      if (code !== 0) reject(new Error(`Plugin install failed for "${label}": ${stderr.trim()}`));
-      else {
-        logger.info(`Installed plugin: ${label}`);
-        resolve();
-      }
-    });
-  });
+  const bunExe = (Bun.which('bun') ?? 'bun').replace(/\\/g, '/');
+  const proc = Bun.spawn([bunExe, ...args], { cwd: cwd.replace(/\\/g, '/'), stderr: 'pipe' });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`Plugin install failed for "${label}": ${stderr.trim()}`);
+  }
+  logger.info(`Installed plugin: ${label}`);
 }
 
 async function readManifest(dir: string): Promise<PluginManifest | undefined> {
@@ -170,7 +161,7 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
     if (type === 'file') {
       await bunRun(['install'], ref, source, this.logger);
       pluginDir = ref;
-      const imported = await import(ref);
+      const imported = await import(ref.replace(/\\/g, '/'));
       mod = (imported.default ?? imported) as PluginModule<TTypes, TFactoryMap>;
     } else {
       await bunRun(['add', installArg], this.pluginsDir, source, this.logger);
