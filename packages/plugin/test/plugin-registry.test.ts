@@ -171,6 +171,33 @@ describe('PluginRegistry', () => {
     });
   });
 
+  describe('checkVersion()', () => {
+    test('reads version from local manifest.json', async () => {
+      const version = await reg.checkVersion(`file:${MOCK_PLUGIN_PATH}`);
+      expect(version).toBe('1.0.0');
+    });
+
+    test('returns undefined for file path without manifest.json', async () => {
+      const version = await reg.checkVersion(`file:${tmpDir}`);
+      expect(version).toBeUndefined();
+    });
+
+    test('fetches version from npm registry', async () => {
+      // bun is a well-known npm package
+      const version = await reg.checkVersion('npm:bun-types');
+      expect(typeof version).toBe('string');
+    });
+  });
+
+  describe('version-based load()', () => {
+    test('skips reload when version unchanged', async () => {
+      await reg.load(`file:${MOCK_PLUGIN_PATH}`);
+      const extsBefore = reg.listExtensions().length;
+      await reg.load(`file:${MOCK_PLUGIN_PATH}`);
+      expect(reg.listExtensions()).toHaveLength(extsBefore);
+    });
+  });
+
   describe('file storage (appName)', () => {
     test('plugin storage persists across registry reset', async () => {
       const r = new PluginRegistry<TestTypes, TestFactoryMap>({ appName: 'test-app' });
