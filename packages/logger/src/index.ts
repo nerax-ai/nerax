@@ -34,7 +34,7 @@ function buildFormat(fmt: LogFormat, colorize = false): winston.Logform.Format {
 }
 
 export function createLogger(config?: LogConfig): Logger {
-  const level = config?.level ?? 'info';
+  const level = config?.level ?? process.env.LOG_LEVEL ?? 'info';
   const baseDir = config?.baseDir ?? (config?.appName ? getStorage(config.appName).state.path : undefined);
   const transports: winston.transport[] = [];
 

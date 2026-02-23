@@ -144,7 +144,8 @@ type AnyRegistry = PluginRegistry<any, any>;
 export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TTypes, unknown>> {
   private static _instance: AnyRegistry | null = null;
 
-  private readonly logger: PluginLogger;
+  private readonly baseLogger: PluginLogger;
+  private readonly registryLogger: PluginLogger;
   private readonly storageFactory: (packageName: string) => PluginStorage;
   private readonly pluginsDir: string;
   private readonly loaded = new Map<string, LoadedPlugin<TTypes, TFactoryMap>>();
@@ -153,7 +154,8 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
   private readonly instances = new Map<string, PluginInstance>();
 
   constructor(config: PluginRegistryConfig = {}) {
-    this.logger = config.logger ?? getLogger(config.appName ?? 'nerax').scope('PluginRegistry');
+    this.baseLogger = config.logger ?? getLogger(config.appName ?? 'nerax');
+    this.registryLogger = this.baseLogger.scope('PluginRegistry');
     this.storageFactory =
       config.storageFactory ??
       (config.appName ? (pkg) => new FilePluginStorage(config.appName!, pkg) : () => new MemoryPluginStorage());
@@ -179,23 +181,23 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
     if (existingManifest) {
       const loaded = this.loaded.get(packageName);
       if (loaded && loaded.manifest.version === existingManifest.version) {
-        this.logger.info(`Plugin already loaded at version ${existingManifest.version}: ${packageName}`);
+        this.registryLogger.info(`Plugin already loaded at version ${existingManifest.version}: ${packageName}`);
         return;
       }
     }
 
-    this.logger.info(`Loading plugin: ${source}`);
+    this.registryLogger.info(`Loading plugin: ${source}`);
 
     let pluginDir: string;
     let mod: PluginModule<TTypes, TFactoryMap>;
 
     if (type === 'file') {
-      await bunRun(['install'], ref, source, this.logger);
+      await bunRun(['install'], ref, source, this.registryLogger);
       pluginDir = ref;
       const imported = await import(ref.replace(/\\/g, '/'));
       mod = (imported.default ?? imported) as PluginModule<TTypes, TFactoryMap>;
     } else {
-      await bunRun(['add', installArg], this.pluginsDir, source, this.logger);
+      await bunRun(['add', installArg], this.pluginsDir, source, this.registryLogger);
       pluginDir = join(this.pluginsDir, 'node_modules', ref, ...(subdir ? [subdir] : []));
       const imported = await import(pluginDir);
       mod = (imported.default ?? imported) as PluginModule<TTypes, TFactoryMap>;
@@ -208,10 +210,10 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
     const loaded = this.loaded.get(packageName);
     if (loaded) {
       if (loaded.manifest.version === newVersion) {
-        this.logger.info(`Plugin already loaded at version ${newVersion}: ${packageName}`);
+        this.registryLogger.info(`Plugin already loaded at version ${newVersion}: ${packageName}`);
         return;
       }
-      this.logger.info(`Updating plugin ${packageName}: ${loaded.manifest.version} → ${newVersion}`);
+      this.registryLogger.info(`Updating plugin ${packageName}: ${loaded.manifest.version} → ${newVersion}`);
       await this.unload(packageName);
     }
 
@@ -248,7 +250,7 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
     }
 
     this.loaded.delete(packageName);
-    this.logger.info(`Plugin unloaded: ${packageName}`);
+    this.registryLogger.info(`Plugin unloaded: ${packageName}`);
   }
 
   hasExtension(ref: string): boolean { return this.resolveExtension(ref) !== undefined; }
@@ -279,7 +281,7 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
 
     const mergedOptions = { ...ext.defaultOptions, ...options };
     const value = await (ext.factory as (c: { instanceId: string; options: typeof mergedOptions; logger: PluginLogger; storage: PluginStorage }) => unknown)({
-      instanceId, options: mergedOptions, logger: this.logger, storage: this.storageFactory(ext.packageName),
+      instanceId, options: mergedOptions, logger: this.baseLogger.scope(ext.packageName), storage: this.storageFactory(ext.packageName),
     });
 
     this.instances.set(instanceId, { instanceId, namespace, extensionFullId: ext.fullId, options: mergedOptions, value });
@@ -306,21 +308,21 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
     this.loaded.set(packageName, loadedPlugin);
 
     const ctx: PluginContext<TTypes, TFactoryMap> = {
-      packageName, manifest, logger: this.logger, storage: this.storageFactory(packageName),
+      packageName, manifest, logger: this.baseLogger.scope(manifest.id), storage: this.storageFactory(packageName),
       register: ((type: TTypes, id: string, factory: TFactoryMap[TTypes], opts: ExtensionOptions = {}) => {
         const fullId = `${packageName}/${id}`;
         const ext: Extension<TTypes, TFactoryMap> = { type, id, fullId, factory, packageName, displayName: opts.displayName, description: opts.description, defaultOptions: opts.defaultOptions };
         this.extensions.set(fullId, ext);
         if (!this.shortNames.has(id)) this.shortNames.set(id, fullId);
-        else if (this.shortNames.get(id) !== fullId) this.logger.warn(`Short name conflict: "${id}" already used by ${this.shortNames.get(id)}`);
+        else if (this.shortNames.get(id) !== fullId) this.registryLogger.warn(`Short name conflict: "${id}" already used by ${this.shortNames.get(id)}`);
         loadedPlugin.extensions.set(fullId, ext);
-        this.logger.debug(`Registered ${type}: ${fullId}`);
+        this.registryLogger.debug(`Registered ${type}: ${fullId}`);
       }) as PluginContext<TTypes, TFactoryMap>['register'],
     };
     loadedPlugin.ctx = ctx;
 
     await mod.setup(ctx);
-    this.logger.info(`Plugin loaded: ${packageName} (${loadedPlugin.extensions.size} extensions)`);
+    this.registryLogger.info(`Plugin loaded: ${packageName} (${loadedPlugin.extensions.size} extensions)`);
   }
 
   private resolveExtension(ref: string): Extension<TTypes, TFactoryMap> | undefined {
