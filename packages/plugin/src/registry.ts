@@ -13,6 +13,7 @@ import { getLogger } from '@nerax-ai/logger';
 import { getStorage } from '@nerax-ai/storage';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
+import { BunInstaller } from './bun-installer';
 
 class MemoryPluginStorage implements PluginStorage {
   private data = new Map<string, unknown>();
@@ -113,12 +114,58 @@ function parseSource(source: string): {
 }
 
 async function bunRun(args: string[], cwd: string, label: string, logger: PluginLogger): Promise<void> {
-  const bunExe = (Bun.which('bun') ?? 'bun').replace(/\\/g, '/');
+  // Use BunInstaller to ensure bun is available (supports auto download)
+  const installer = new BunInstaller();
+  const bunExe = await installer.ensureBun();
   const proc = Bun.spawn([bunExe, ...args], { cwd: cwd.replace(/\\/g, '/'), stderr: 'pipe' });
   const exitCode = await proc.exited;
   if (exitCode !== 0)
     throw new Error(`Plugin install failed for "${label}": ${(await new Response(proc.stderr).text()).trim()}`);
   logger.info(`Installed plugin: ${label}`);
+}
+
+/**
+ * Extract GitHub tarball to target directory (pure JS, no external deps)
+ */
+async function extractTarball(buffer: ArrayBuffer, targetDir: string, expectedRepo: string): Promise<string> {
+  const { writeFileSync, mkdirSync, renameSync } = await import('fs');
+  const { join: joinPath } = await import('path');
+  
+  const decompressed = Bun.gunzipSync(new Uint8Array(buffer));
+  let offset = 0;
+  let extractedRoot = '';
+  const view = new Uint8Array(decompressed);
+  
+  while (offset < view.length - 512) {
+    const header = view.slice(offset, offset + 512);
+    const name = new TextDecoder().decode(header.slice(0, 100)).replace(/\0/g, '');
+    if (!name) break;
+    
+    const sizeStr = new TextDecoder().decode(header.slice(124, 136)).replace(/\0/g, '').trim();
+    const size = parseInt(sizeStr, 8) || 0;
+    const typeFlag = String.fromCharCode(header[156]);
+    
+    offset += 512;
+    
+    if (name.endsWith('/') || typeFlag === '5') {
+      try { mkdirSync(joinPath(targetDir, name), { recursive: true }); } catch {}
+    } else if (size > 0) {
+      if (!extractedRoot && name.includes('/')) {
+        extractedRoot = name.split('/')[0];
+      }
+      const parentDir = joinPath(targetDir, name.substring(0, name.lastIndexOf('/')));
+      try { mkdirSync(parentDir, { recursive: true }); } catch {}
+      writeFileSync(joinPath(targetDir, name), view.slice(offset, offset + size));
+    }
+    
+    offset += Math.ceil(size / 512) * 512;
+  }
+  
+  if (extractedRoot && extractedRoot !== expectedRepo) {
+    try { renameSync(joinPath(targetDir, extractedRoot), joinPath(targetDir, expectedRepo)); } catch {}
+  }
+  
+  return joinPath(targetDir, expectedRepo);
 }
 
 function readManifest(dir: string): PluginManifest | undefined {
@@ -232,7 +279,7 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
   }
 
   async load(source: string): Promise<void> {
-    const { type, ref, installArg, subdir } = parseSource(source);
+    const { type, ref, installArg, subdir, branch } = parseSource(source);
     const packageName = type === 'file' ? (ref.split(/[/\\]/).pop() ?? 'unknown') : subdir ? `${ref}/${subdir}` : ref;
 
     // Check version before installing
@@ -257,13 +304,64 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
       const imported = await import(ref.replace(/\\/g, '/'));
       mod = (imported.default ?? imported) as PluginModule<TTypes, TFactoryMap>;
     } else {
-      await bunRun(['add', installArg], this.pluginsDir, source, this.registryLogger);
-      pluginDir = join(this.pluginsDir, 'node_modules', ref, ...(subdir ? [subdir] : []));
-      const imported = await import(pluginDir);
+      // Download from GitHub using tarball (no git required)
+      const [owner, repo] = ref.split('/');
+      const targetDir = join(this.pluginsDir, owner, repo);
+      const tarballDir = join(this.pluginsDir, owner);
+      
+      // Create directory structure
+      const { mkdirSync } = await import('fs');
+      if (!existsSync(tarballDir)) {
+        mkdirSync(tarballDir, { recursive: true });
+      }
+      
+      // Download and extract tarball if not exists
+      if (!existsSync(targetDir)) {
+        // GitHub tarball URL format: https://github.com/owner/repo/archive/refs/heads/branch.tar.gz
+        const tarballUrl = branch 
+          ? `https://github.com/${ref}/archive/refs/heads/${branch}.tar.gz`
+          : `https://github.com/${ref}/archive/refs/heads/main.tar.gz`;
+        
+        this.registryLogger.info(`Downloading ${tarballUrl}`);
+        
+        const response = await fetch(tarballUrl);
+        if (!response.ok) {
+          // Try master if main fails
+          const masterUrl = `https://github.com/${ref}/archive/refs/heads/master.tar.gz`;
+          const masterResp = await fetch(masterUrl);
+          if (!masterResp.ok) throw new Error(`Failed to download: ${ref}`);
+          await extractTarball(await masterResp.arrayBuffer(), tarballDir, repo);
+        } else {
+          await extractTarball(await response.arrayBuffer(), tarballDir, repo);
+        }
+      }
+      
+      pluginDir = join(targetDir, ...(subdir ? [subdir] : []));
+      await bunRun(['install'], pluginDir, source, this.registryLogger);
+      // Try multiple entry points for plugin
+      const entryPoints = [
+        pluginDir,
+        join(pluginDir, 'src', 'index.ts'),
+        join(pluginDir, 'src', 'index.js'),
+        join(pluginDir, 'index.ts'),
+        join(pluginDir, 'index.js'),
+      ];
+      let imported: any;
+      for (const entry of entryPoints) {
+        try {
+          imported = await import(entry);
+          break;
+        } catch {
+          continue;
+        }
+      }
+      if (!imported) throw new Error(`Cannot find entry point: ${packageName}`);
       mod = (imported.default ?? imported) as PluginModule<TTypes, TFactoryMap>;
     }
 
-    if (typeof mod.setup !== 'function') throw new Error(`Plugin "${packageName}" does not export a setup function`);
+    if (typeof mod.setup !== 'function') {
+      throw new Error(`Invalid plugin module: ${packageName}`);
+    }
 
     const fileManifest = readManifest(pluginDir);
     const newVersion = fileManifest?.version ?? mod.manifest?.version;
