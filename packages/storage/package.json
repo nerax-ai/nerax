@@ -1,14 +1,17 @@
 {
   "name": "@nerax-ai/storage",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
+  "source": "./src/index.ts",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs"
     }
   },
   "files": [
@@ -16,12 +19,5 @@
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "scripts": {
-    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
-    "dev": "tsc --watch",
-    "lint": "tsc --noEmit",
-    "test": "bun test",
-    "clean": "rm -rf dist"
   }
 }

@@ -41,7 +41,7 @@ registry.register({
 await registry.unload('my-plugin');
 
 // List extensions, optionally filtered by type
-registry.listExtensions();           // all
+registry.listExtensions(); // all
 registry.listExtensions('provider'); // only providers
 
 // List created instances, optionally filtered by namespace
