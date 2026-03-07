@@ -130,41 +130,47 @@ async function bunRun(args: string[], cwd: string, label: string, logger: Plugin
 async function extractTarball(buffer: ArrayBuffer, targetDir: string, expectedRepo: string): Promise<string> {
   const { writeFileSync, mkdirSync, renameSync } = await import('fs');
   const { join: joinPath } = await import('path');
-  
+
   const decompressed = Bun.gunzipSync(new Uint8Array(buffer));
   let offset = 0;
   let extractedRoot = '';
   const view = new Uint8Array(decompressed);
-  
+
   while (offset < view.length - 512) {
     const header = view.slice(offset, offset + 512);
     const name = new TextDecoder().decode(header.slice(0, 100)).replace(/\0/g, '');
     if (!name) break;
-    
+
     const sizeStr = new TextDecoder().decode(header.slice(124, 136)).replace(/\0/g, '').trim();
     const size = parseInt(sizeStr, 8) || 0;
     const typeFlag = String.fromCharCode(header[156]);
-    
+
     offset += 512;
-    
+
     if (name.endsWith('/') || typeFlag === '5') {
-      try { mkdirSync(joinPath(targetDir, name), { recursive: true }); } catch {}
+      try {
+        mkdirSync(joinPath(targetDir, name), { recursive: true });
+      } catch {}
     } else if (size > 0) {
       if (!extractedRoot && name.includes('/')) {
         extractedRoot = name.split('/')[0];
       }
       const parentDir = joinPath(targetDir, name.substring(0, name.lastIndexOf('/')));
-      try { mkdirSync(parentDir, { recursive: true }); } catch {}
+      try {
+        mkdirSync(parentDir, { recursive: true });
+      } catch {}
       writeFileSync(joinPath(targetDir, name), view.slice(offset, offset + size));
     }
-    
+
     offset += Math.ceil(size / 512) * 512;
   }
-  
+
   if (extractedRoot && extractedRoot !== expectedRepo) {
-    try { renameSync(joinPath(targetDir, extractedRoot), joinPath(targetDir, expectedRepo)); } catch {}
+    try {
+      renameSync(joinPath(targetDir, extractedRoot), joinPath(targetDir, expectedRepo));
+    } catch {}
   }
-  
+
   return joinPath(targetDir, expectedRepo);
 }
 
@@ -308,25 +314,39 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
       const [owner, repo] = ref.split('/');
       const targetDir = join(this.pluginsDir, owner, repo);
       const tarballDir = join(this.pluginsDir, owner);
-      
+
       // Create directory structure
       const { mkdirSync } = await import('fs');
       if (!existsSync(tarballDir)) {
         mkdirSync(tarballDir, { recursive: true });
       }
-      
-      // Download and extract tarball if not exists
-      if (!existsSync(targetDir)) {
-        // GitHub tarball URL format: https://github.com/owner/repo/archive/refs/heads/branch.tar.gz
-        const tarballUrl = branch 
+
+      // Download and extract tarball if not exists or remote version differs
+      const needsDownload = await (async () => {
+        if (!existsSync(targetDir)) return true;
+        const localManifest = readManifest(join(targetDir, ...(subdir ? [subdir] : [])));
+        if (!localManifest) return true;
+        const remoteManifest = await fetchRemoteManifest(type as 'github' | 'git', ref, branch, subdir);
+        if (!remoteManifest) return false; // can't reach remote, keep local
+        if (remoteManifest.version !== localManifest.version) {
+          this.registryLogger.info(`Plugin update available: ${localManifest.version} → ${remoteManifest.version}`);
+          return true;
+        }
+        return false;
+      })();
+
+      if (needsDownload) {
+        const { rmSync } = await import('fs');
+        if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
+
+        const tarballUrl = branch
           ? `https://github.com/${ref}/archive/refs/heads/${branch}.tar.gz`
           : `https://github.com/${ref}/archive/refs/heads/main.tar.gz`;
-        
+
         this.registryLogger.info(`Downloading ${tarballUrl}`);
-        
+
         const response = await fetch(tarballUrl);
         if (!response.ok) {
-          // Try master if main fails
           const masterUrl = `https://github.com/${ref}/archive/refs/heads/master.tar.gz`;
           const masterResp = await fetch(masterUrl);
           if (!masterResp.ok) throw new Error(`Failed to download: ${ref}`);
@@ -335,7 +355,7 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
           await extractTarball(await response.arrayBuffer(), tarballDir, repo);
         }
       }
-      
+
       pluginDir = join(targetDir, ...(subdir ? [subdir] : []));
       await bunRun(['install'], pluginDir, source, this.registryLogger);
       // Try multiple entry points for plugin

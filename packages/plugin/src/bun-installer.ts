@@ -98,7 +98,7 @@ export class BunInstaller {
       linux: 'linux',
       windows: 'windows',
     };
-    
+
     const archMap: Record<string, string> = {
       x64: 'x64',
       arm64: 'aarch64',
@@ -130,12 +130,12 @@ export class BunInstaller {
     // Write to temp file first, then extract using system command
     const tempFile = join(targetDir, 'temp.zip');
     writeFileSync(tempFile, data);
-    
+
     const proc = Bun.spawn(['unzip', '-o', tempFile, '-d', targetDir], {
       cwd: targetDir,
     });
     await proc.exited;
-    
+
     // Clean up temp file
     unlinkSync(tempFile);
   }
@@ -146,7 +146,7 @@ export class BunInstaller {
   private async extractBinary(buffer: ArrayBuffer, targetPath: string): Promise<void> {
     // Bun releases may be pure binary or gzip
     const data = new Uint8Array(buffer);
-    
+
     // Check if gzip
     if (data[0] === 0x1f && data[1] === 0x8b) {
       // Is gzip, decompress
