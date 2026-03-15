@@ -8,6 +8,7 @@ import type {
   Extension,
   ExtensionOptions,
   PluginInstance,
+  Schema,
 } from './types';
 import { getLogger } from '@nerax-ai/logger';
 import { getStorage } from '@nerax-ai/storage';
@@ -440,6 +441,12 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
     return type ? all.filter((e) => e.type === type) : all;
   }
 
+  getExtensionSchema(type: TTypes, ref: string): Schema | undefined {
+    const ext = this.resolveExtension(ref);
+    if (!ext || ext.type !== type) return undefined;
+    return ext.schema;
+  }
+
   listInstances(namespace?: string): PluginInstance[] {
     const all = [...this.instances.values()];
     return namespace ? all.filter((i) => i.namespace === namespace) : all;
@@ -535,6 +542,7 @@ export class PluginRegistry<TTypes extends string, TFactoryMap extends Record<TT
           displayName: opts.displayName,
           description: opts.description,
           defaultOptions: opts.defaultOptions,
+          schema: opts.schema,
         };
         this.extensions.set(fullId, ext);
         if (!this.shortNames.has(id)) this.shortNames.set(id, fullId);
